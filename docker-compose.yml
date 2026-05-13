@@ -1,0 +1,66 @@
+services:
+  node1:
+    build: .
+    container_name: proiect_retele_node1
+    command:
+      - python
+      - -m
+      - app.main
+      - --node-id
+      - node1
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --callback-host
+      - node1
+      - --callback-port
+      - "5000"
+    ports:
+      - "5001:5000"
+    stdin_open: true
+    tty: true
+
+  node2:
+    build: .
+    container_name: proiect_retele_node2
+    command:
+      - sh
+      - -c
+      - >-
+        sleep 1 &&
+        python -m app.main
+        --node-id node2
+        --host 0.0.0.0
+        --port 5000
+        --callback-host node2
+        --callback-port 5000
+        --upstreams node1:5000
+    ports:
+      - "5002:5000"
+    stdin_open: true
+    tty: true
+    depends_on:
+      - node1
+
+  node3:
+    build: .
+    container_name: proiect_retele_node3
+    command:
+      - sh
+      - -c
+      - >-
+        sleep 2 &&
+        python -m app.main
+        --node-id node3
+        --host 0.0.0.0
+        --port 5000
+        --callback-host node3
+        --callback-port 5000
+        --upstreams node2:5000,node1:5000
+    ports:
+      - "5003:5000"
+    stdin_open: true
+    tty: true
+    depends_on:
+      - node2

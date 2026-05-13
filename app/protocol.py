@@ -1,12 +1,12 @@
 import json
 
 
-MAX_MESSAGE_SIZE = 64 * 1024
+MAX_MESSAGE_SIZE = 2 * 1024 * 1024
 
 
 def send_json(sock, message: dict):
     data = json.dumps(message).encode("utf-8") + b"\n"
-    sock.sendall(data) 
+    sock.sendall(data)
 
 
 def recv_json(sock) -> dict:
