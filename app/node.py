@@ -31,6 +31,9 @@ class Node:
         self.subscriptions = {}
         self.message_queue = queue.Queue()
         self.max_payload_size = 1024 * 1024
+        self.delivery_results = {}
+        self.delivery_result_events = {}
+        self.delivery_results_lock = threading.Lock()
 
     def start(self):
         try:
@@ -460,7 +463,7 @@ class Node:
             if action == "publish":
                 key = message["key"]
                 payload = base64.b64decode(message["payload_b64"].encode("ascii"))
-                publish_ack = self.publish(key, payload)
+                publish_ack = self.publish(key, payload, track_results=False)
                 return {
                     "type": "LOCAL_COMMAND_ACK",
                     "status": publish_ack["status"],
@@ -633,7 +636,13 @@ class Node:
             key = message.get("key", "")
             payload_b64 = message["payload_b64"]
             payload = base64.b64decode(payload_b64.encode("ascii"))
-            publish_ack = self.publish(key, payload)
+            wait_for_results = bool(message.get("wait_for_results", True))
+            result_timeout = float(message.get("result_timeout", 5))
+            publish_ack = self.publish(
+                key,
+                payload,
+                track_results=wait_for_results,
+            )
 
             response = {
                 "type": "PUBLISH_ACK",
@@ -646,6 +655,14 @@ class Node:
                 if field in publish_ack:
                     response[field] = publish_ack[field]
 
+            if publish_ack["status"] == "OK" and wait_for_results:
+                completed, delivery_results = self.wait_for_delivery_results(
+                    publish_ack["message_id"],
+                    result_timeout,
+                )
+                response["delivery_completed"] = completed
+                response["delivery_results"] = delivery_results
+
             return response
 
         except Exception as error:
@@ -656,7 +673,7 @@ class Node:
                 "error": str(error),
             }
 
-    def publish(self, key: str, payload: bytes):
+    def publish(self, key: str, payload: bytes, track_results: bool = False):
         if not key:
             print(f"[{self.config.node_id}] Publish failed: missing key")
             return {
@@ -678,6 +695,9 @@ class Node:
             "producer_id": self.config.node_id,
         }
 
+        if track_results:
+            self.register_delivery_tracking(message["message_id"])
+
         self.message_queue.put(message)
 
         print(
@@ -690,6 +710,45 @@ class Node:
             "message_id": message["message_id"],
             "size": len(payload),
         }
+
+    def register_delivery_tracking(self, message_id: str):
+        with self.delivery_results_lock:
+            self.delivery_results[message_id] = []
+            self.delivery_result_events[message_id] = threading.Event()
+
+    def store_delivery_results(self, message_id: str, results: list[dict]):
+        with self.delivery_results_lock:
+            if (
+                message_id not in self.delivery_results
+                and message_id not in self.delivery_result_events
+            ):
+                return
+
+            self.delivery_results[message_id] = results
+            event = self.delivery_result_events.get(message_id)
+
+        if event:
+            event.set()
+
+    def wait_for_delivery_results(
+        self,
+        message_id: str,
+        timeout: float,
+    ) -> tuple[bool, list[dict]]:
+        with self.delivery_results_lock:
+            event = self.delivery_result_events.get(message_id)
+
+        if not event:
+            return True, []
+
+        completed = event.wait(timeout)
+
+        with self.delivery_results_lock:
+            results = list(self.delivery_results.get(message_id, []))
+            self.delivery_result_events.pop(message_id, None)
+            self.delivery_results.pop(message_id, None)
+
+        return completed, results
 
     def dispatch_loop(self):
         while self.running:
@@ -704,12 +763,14 @@ class Node:
     def dispatch_message(self, message: dict):
         key = message["key"]
         subscribers = set(self.subscriptions.get(key, set()))
+        delivery_results = []
 
         if not subscribers:
             print(
                 f"[{self.config.node_id}] No subscribers for "
                 f"message {message['message_id']} key={key}"
             )
+            self.store_delivery_results(message["message_id"], delivery_results)
             return
 
         print(
@@ -720,13 +781,23 @@ class Node:
         for subscriber_id in subscribers:
             if subscriber_id == self.config.node_id:
                 ack = self.handle_local_delivery(message)
+                delivery_results.append({
+                    "node_id": self.config.node_id,
+                    **ack,
+                })
 
                 print(
                     f"[{self.config.node_id}] Local ACK "
                     f"message_id={message['message_id']} status={ack['status']}"
                 )
             else:
-                self.deliver_message_to_node(subscriber_id, message)
+                ack = self.deliver_message_to_node(subscriber_id, message)
+                delivery_results.append({
+                    "node_id": subscriber_id,
+                    **ack,
+                })
+
+        self.store_delivery_results(message["message_id"], delivery_results)
 
     def deliver_message_to_node(self, target_node_id: str, message: dict):
         if target_node_id not in self.known_nodes:
@@ -734,7 +805,10 @@ class Node:
                 f"[{self.config.node_id}] Cannot deliver "
                 f"{message['message_id']} to {target_node_id}: unknown node"
             )
-            return
+            return {
+                "status": "ERROR",
+                "error": "unknown node",
+            }
 
         host, port = self.known_nodes[target_node_id]
 
@@ -757,6 +831,8 @@ class Node:
                     f"to {target_node_id} | response={response}"
                 )
 
+                return response
+
         except Exception as error:
             print(
                 f"[{self.config.node_id}] Delivery failed for "
@@ -764,6 +840,10 @@ class Node:
             )
             self.remove_node(target_node_id)
             self.announce_peer_left(target_node_id)
+            return {
+                "status": "ERROR",
+                "error": str(error),
+            }
 
     def handle_local_delivery(self, message: dict) -> dict:
         print(

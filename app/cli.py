@@ -28,6 +28,8 @@ def main():
     publish_parser = subparsers.add_parser("publish")
     publish_parser.add_argument("key")
     publish_parser.add_argument("payload", nargs="+")
+    publish_parser.add_argument("--no-wait", action="store_true")
+    publish_parser.add_argument("--result-timeout", type=float, default=5)
 
     subparsers.add_parser("subs")
     subparsers.add_parser("peers")
@@ -43,6 +45,8 @@ def main():
             "payload_b64": base64.b64encode(
                 payload_text.encode("utf-8")
             ).decode("ascii"),
+            "wait_for_results": not args.no_wait,
+            "result_timeout": args.result_timeout,
         }
 
     else:

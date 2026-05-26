@@ -122,6 +122,13 @@ Publicare mesaj:
 docker compose exec node1 python -m app.cli publish uppercase salut
 ```
 
+Implicit, comanda `publish` asteapta ACK-urile consumatorilor si afiseaza rezultatele procesarii in campul `delivery_results`.
+Pentru a primi doar `PUBLISH_ACK` fara asteptarea rezultatelor:
+
+```bash
+docker compose exec node1 python -m app.cli publish uppercase salut --no-wait
+```
+
 Alte exemple:
 
 ```bash
@@ -187,6 +194,22 @@ node1: Dispatching message ...
 node3: Processing message ... key=uppercase
 node3: Processed message ... result=SALUT
 node1: Delivered ... response={'type': 'ACK', 'status': 'OK', ...}
+```
+
+Raspunsul comenzii `publish` include si rezultatul:
+
+```json
+{
+  "type": "PUBLISH_ACK",
+  "status": "OK",
+  "delivery_results": [
+    {
+      "node_id": "node3",
+      "status": "OK",
+      "result": "SALUT"
+    }
+  ]
+}
 ```
 
 5. Demonstrare procesare diferita:
