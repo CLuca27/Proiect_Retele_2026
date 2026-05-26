@@ -20,11 +20,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--node-id", required=True)
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--upstreams", default="") 
+    parser.add_argument("--port", type=int, default=5000)
+    parser.add_argument("--upstreams", default="")
     parser.add_argument("--callback-host", default="127.0.0.1")
     parser.add_argument("--callback-port", type=int)
-
+    parser.add_argument("--port-search-limit", type=int, default=20)
 
     args = parser.parse_args() 
 
@@ -36,8 +36,9 @@ def main():
         port=args.port, 
         callback_host=args.callback_host, 
         callback_port=callback_port,
-        upstreams=parse_upstreams(args.upstreams)    
-        )
+        upstreams=parse_upstreams(args.upstreams),
+        port_search_limit=args.port_search_limit,
+    )
 
     node = Node(config)
     node.start()

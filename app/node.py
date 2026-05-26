@@ -4,6 +4,7 @@ import time
 import uuid
 import queue
 import base64
+import errno
 from dataclasses import dataclass
 from app.protocol import recv_json, send_json
 from app.commands import process_message
@@ -16,6 +17,7 @@ class NodeConfig:
     callback_host: str
     callback_port: int
     upstreams: list[tuple[str, int]]
+    port_search_limit: int = 20
 
 
 class Node:
@@ -31,7 +33,18 @@ class Node:
         self.max_payload_size = 1024 * 1024
 
     def start(self):
-        server_thread = threading.Thread(target=self.start_server, daemon=True)
+        try:
+            server_socket = self.create_server_socket()
+        except OSError as error:
+            print(f"[{self.config.node_id}] Failed to start server: {error}")
+            self.running = False
+            return
+
+        server_thread = threading.Thread(
+            target=self.start_server,
+            args=(server_socket,),
+            daemon=True,
+        )
         server_thread.start()
 
         console_thread = threading.Thread(target=self.console_loop, daemon=True)
@@ -52,17 +65,60 @@ class Node:
             print(f"\n[{self.config.node_id}] Stopping node...")
             self.running = False
 
-    def start_server(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+    def create_server_socket(self):
+        last_error = None
+        first_port = self.config.port
+        last_port = self.config.port + self.config.port_search_limit
+
+        for port in range(first_port, last_port + 1):
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server_socket.bind((self.config.host, self.config.port))
-            server_socket.listen()
 
-            print(
-                f"[{self.config.node_id}] Server listening on "
-                f"{self.config.host}:{self.config.port}"
-            )
+            try:
+                server_socket.bind((self.config.host, port))
+                server_socket.listen()
 
+                if port != self.config.port:
+                    print(
+                        f"[{self.config.node_id}] Port {self.config.port} is busy. "
+                        f"Using port {port} instead."
+                    )
+                    self.config.port = port
+                    self.config.callback_port = port
+
+                print(
+                    f"[{self.config.node_id}] Server listening on "
+                    f"{self.config.host}:{self.config.port}"
+                )
+
+                return server_socket
+
+            except OSError as error:
+                server_socket.close()
+                last_error = error
+
+                if not self.is_address_in_use(error):
+                    raise
+
+                print(
+                    f"[{self.config.node_id}] Port {port} is unavailable, "
+                    "trying next port..."
+                )
+
+        raise OSError(
+            f"No free port found in range {first_port}-{last_port}"
+        ) from last_error
+
+    def is_address_in_use(self, error: OSError) -> bool:
+        return (
+            error.errno == errno.EADDRINUSE
+            or error.errno == errno.EACCES
+            or getattr(error, "winerror", None) == 10048
+            or getattr(error, "winerror", None) == 10013
+        )
+
+    def start_server(self, server_socket):
+        with server_socket:
             while self.running:
                 client_socket, client_address = server_socket.accept()
 
@@ -164,6 +220,10 @@ class Node:
                             "status": "OK",
                         },
                     )
+
+                elif message_type == "PUBLISH":
+                    response = self.handle_publish_event(message)
+                    send_json(client_socket, response)
 
                 elif message_type == "DELIVER":
                     ack = self.handle_deliver_event(message)
@@ -400,12 +460,17 @@ class Node:
             if action == "publish":
                 key = message["key"]
                 payload = base64.b64decode(message["payload_b64"].encode("ascii"))
-                self.publish(key, payload)
+                publish_ack = self.publish(key, payload)
                 return {
                     "type": "LOCAL_COMMAND_ACK",
-                    "status": "OK",
+                    "status": publish_ack["status"],
                     "action": action,
                     "key": key,
+                    **{
+                        field: publish_ack[field]
+                        for field in ("message_id", "size", "error")
+                        if field in publish_ack
+                    },
                 }
 
             if action == "subs":
@@ -563,14 +628,48 @@ class Node:
         self.remove_node(node_id)
         self.propagate_event(message, exclude_node_id=node_id)
 
+    def handle_publish_event(self, message: dict) -> dict:
+        try:
+            key = message.get("key", "")
+            payload_b64 = message["payload_b64"]
+            payload = base64.b64decode(payload_b64.encode("ascii"))
+            publish_ack = self.publish(key, payload)
+
+            response = {
+                "type": "PUBLISH_ACK",
+                "node_id": self.config.node_id,
+                "status": publish_ack["status"],
+                "key": key,
+            }
+
+            for field in ("message_id", "size", "error"):
+                if field in publish_ack:
+                    response[field] = publish_ack[field]
+
+            return response
+
+        except Exception as error:
+            return {
+                "type": "PUBLISH_ACK",
+                "node_id": self.config.node_id,
+                "status": "ERROR",
+                "error": str(error),
+            }
+
     def publish(self, key: str, payload: bytes):
         if not key:
             print(f"[{self.config.node_id}] Publish failed: missing key")
-            return
+            return {
+                "status": "ERROR",
+                "error": "missing key",
+            }
 
         if len(payload) > self.max_payload_size:
             print(f"[{self.config.node_id}] Publish failed: payload too large")
-            return
+            return {
+                "status": "ERROR",
+                "error": "payload too large",
+            }
 
         message = {
             "message_id": str(uuid.uuid4()),
@@ -585,6 +684,12 @@ class Node:
             f"[{self.config.node_id}] Queued message "
             f"{message['message_id']} key={key} size={len(payload)} bytes"
         )
+
+        return {
+            "status": "OK",
+            "message_id": message["message_id"],
+            "size": len(payload),
+        }
 
     def dispatch_loop(self):
         while self.running:

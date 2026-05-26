@@ -35,20 +35,24 @@ def main():
 
     args = parser.parse_args()
 
-    command = {
-        "type": "LOCAL_COMMAND",
-        "action": args.action,
-    }
+    if args.action == "publish":
+        payload_text = " ".join(args.payload)
+        command = {
+            "type": "PUBLISH",
+            "key": args.key,
+            "payload_b64": base64.b64encode(
+                payload_text.encode("utf-8")
+            ).decode("ascii"),
+        }
+
+    else:
+        command = {
+            "type": "LOCAL_COMMAND",
+            "action": args.action,
+        }
 
     if args.action in ("subscribe", "unsubscribe"):
         command["key"] = args.key
-
-    elif args.action == "publish":
-        payload_text = " ".join(args.payload)
-        command["key"] = args.key
-        command["payload_b64"] = base64.b64encode(
-            payload_text.encode("utf-8")
-        ).decode("ascii")
 
     response = send_local_command(args.host, args.port, command)
     print(json.dumps(response, indent=2))
