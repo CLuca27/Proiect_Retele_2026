@@ -918,6 +918,8 @@ class Node:
             "event_id": event_id,
             "node_id": node_id,
         }
-
-        self.propagate_event(event, exclude_node_id=node_id)
+        
+        for target_node_id in list(self.known_nodes.keys()):
+            if target_node_id != node_id:
+                self.send_event_to_node(target_node_id, event)
 
